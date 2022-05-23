@@ -1,0 +1,126 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-web-app
+  labels:
+    env  : test
+    app  : nginx
+    dest : web-app
+    owner: Mikhail_Melekhin
+spec:
+  selector:
+    matchLabels:
+      app: nginx
+  template:
+    metadata:
+      labels:
+        app: nginx
+    spec:
+      affinity: #Правило на распределение подов по зонам
+       podAffinity:
+        requiredDuringSchedulingIgnoredDuringExecution:
+        - labelSelector:
+           matchExpressions:
+           - key: app
+             operator: In
+             values:
+             - nginx
+          topologyKey: topology.kubernetes.io/zone
+      containers:
+      - name: nginx
+        image: nginx:alpine #Для примера взял легкий образ nginx
+        resources:
+         requests:
+          cpu: "0.1" #Как требуется в задании, ровное потребление в 0.1 CPU
+          memory: "128M" #Память ровно 128 мб
+         limits:
+          cpu: "1" #Значительное значение CPU для запуска приложения. Не придумал, какое точно взять, взял целое
+
+        ports:
+        - containerPort: 80
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: nginxautoscaler
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: test-web-app
+  minReplicas: 1
+  maxReplicas: 4
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 80
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: AverageValue
+        averageValue: 128Mi
+
+---
+apiVersion: v1
+kind: Service #Сервис по доступу к подам и распределению нагрузки между ними
+metadata:
+  labels:
+      env  : test
+      app  : nginx
+      dest : web-app
+      owner: Mikhail_Melekhin
+  name: web-app
+spec:
+  type: LoadBalancer
+  ports:
+  - name: http
+    port: 80
+    targetPort: 80
+    protocol: TCP
+  selector:
+    target: web
+
+
+---
+apiVersion: batch/v1 #Таска по нагрузке в циклы
+kind: CronJob #Сделал через CronJob, так как нашел простой пример такого решения. Возможно, есть вариант получше,
+metadata:
+  name: scale-up
+spec:
+  schedule: "0 8 * * *" #Выполняется в 8 утра
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: upscaler
+            image: autoscaler
+            args:
+            - /bin/bash
+            - -c
+            - kubectl scale --replicas=4 deployment/test-nginx #Пиковая нагрузка в 4 пода
+          restartPolicy: OnFailure
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: scale-down
+spec:
+  schedule: "0 22 * * *" #Выполняется в 22 вечера
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: downscaler
+            image: autoscaler
+            args:
+            - /bin/bash
+            - -c
+            - kubectl scale --replicas=1 deployment/test-nginx #Минимальная нагрузка в 1 под
+          restartPolicy: OnFailure
